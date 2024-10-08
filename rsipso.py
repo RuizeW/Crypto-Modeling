@@ -28,14 +28,14 @@ def backtest_rsi(params, data):
     initial_cash = 10000
     cash = initial_cash
     position = 0
-    buy_signals = []
-    sell_signals = []
-    portfolio_values = []
+    buy_signals = [None]  # Start with None to match the length with data
+    sell_signals = [None]  # Start with None to match the length with data
+    portfolio_values = [initial_cash]  # Start with initial cash to match the length with data
     price_data = data['close'].values
     trade_count = 0  # Track the number of trades
 
-    for i in range(len(data)):
-        rsi = data['RSI'].iloc[i]
+    for i in range(1, len(data)):
+        rsi = data['RSI'].iloc[i - 1]  # Use previous day's RSI to avoid look-ahead bias
         price = data['close'].iloc[i]
 
         if np.isnan(rsi):
@@ -84,7 +84,7 @@ def calculate_max_drawdown(portfolio_values):
 
 # Objective function for optimization (maximize final portfolio value)
 def objective_function(params, data):
-    _, final_value, _ = backtest_rsi(params, data)
+    _, final_value, _ = backtest_rsi(params, data.copy())  # Use a copy of the data to avoid modifying the original
     return -final_value  # Since PSO minimizes the objective function, return negative final portfolio value
 
 # Use PSO to optimize RSI parameters
@@ -138,7 +138,7 @@ def plot_performance(data):
 # Main function
 if __name__ == '__main__':
     # Use uploaded file
-    csv_file = 'D:/research project/data2024/1m.csv'
+    csv_file = 'D:/research project/data-2y/1d.csv'
 
     # Read data
     data = read_data(csv_file)
