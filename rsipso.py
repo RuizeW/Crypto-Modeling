@@ -14,24 +14,25 @@ def read_data(file_path):
 def calculate_rsi(data, period=14):
     delta = data['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean().replace(0, np.nan).ffill()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# Function to backtest the RSI strategy
+# Backtest function for the optimized RSI strategy
 def backtest_rsi(params, data):
     rsi_period, rsi_overbought, rsi_oversold = params
-    data['RSI'] = calculate_rsi(data, period=int(rsi_period))
+    data = data.copy()
+
+    data['RSI'] = calculate_rsi(data, period=int(rsi_period)).astype(float)
 
     # Initialize cash, position, and buy/sell signals
     initial_cash = 10000
     cash = initial_cash
     position = 0
-    buy_signals = [None]  # Start with None to match the length with data
-    sell_signals = [None]  # Start with None to match the length with data
-    portfolio_values = [initial_cash]  # Start with initial cash to match the length with data
-    price_data = data['close'].values
+    buy_signals = [None] * len(data)
+    sell_signals = [None] * len(data)
+    portfolio_values = [initial_cash] * len(data)
     trade_count = 0  # Track the number of trades
 
     for i in range(1, len(data)):
@@ -39,34 +40,26 @@ def backtest_rsi(params, data):
         price = data['close'].iloc[i]
 
         if np.isnan(rsi):
-            buy_signals.append(None)
-            sell_signals.append(None)
-            portfolio_values.append(cash + position * price)
+            portfolio_values[i] = cash + position * price
             continue
 
         if rsi < rsi_oversold and cash > 0:
             # Buy signal
             position = cash / price
             cash = 0
-            buy_signals.append(price)
-            sell_signals.append(None)
+            buy_signals[i] = price
             trade_count += 1  # Record a trade
         elif rsi > rsi_overbought and position > 0:
             # Sell signal
             cash = position * price
             position = 0
-            buy_signals.append(None)
-            sell_signals.append(price)
+            sell_signals[i] = price
             trade_count += 1  # Record a trade
-        else:
-            buy_signals.append(None)
-            sell_signals.append(None)
 
         # Calculate the current portfolio value
-        portfolio_value = cash + position * price
-        portfolio_values.append(portfolio_value)
+        portfolio_values[i] = cash + position * price
 
-    final_value = cash + position * price_data[-1]
+    final_value = cash + position * data['close'].iloc[-1]
 
     # Append buy/sell signals and portfolio values to the data
     data['buy_signals'] = buy_signals
@@ -85,15 +78,93 @@ def calculate_max_drawdown(portfolio_values):
 # Objective function for optimization (maximize final portfolio value)
 def objective_function(params, data):
     _, final_value, _ = backtest_rsi(params, data.copy())  # Use a copy of the data to avoid modifying the original
-    return -final_value  # Since PSO minimizes the objective function, return negative final portfolio value
+    return -final_value  # Since differential_evolution minimizes the objective function, return negative final portfolio value
 
-# Use PSO to optimize RSI parameters
+# Use differential evolution to optimize RSI parameters
 def optimize_rsi(data):
     bounds = [(5, 30), (60, 80), (10, 30)]  # Bounds for RSI period, overbought, oversold parameters
-    result = differential_evolution(objective_function, bounds, args=(data,), maxiter=100, disp=True)
+    result = differential_evolution(objective_function, bounds, args=(data,), maxiter=100, disp=False)
     optimal_params = result.x
     final_value = -result.fun
     return optimal_params, final_value
+
+# Function to dynamically train and test the RSI strategy
+def dynamic_train_test(data):
+    initial_cash = 10000
+    cash = initial_cash
+    position = 0
+    trade_count = 0
+    window_size = 100  # Define a window size for training
+    portfolio_values = []
+    buy_signals = []
+    sell_signals = []
+
+    for i in range(window_size, len(data)):
+        train_data = data.iloc[:i]  # Use data up to the current point as training data
+
+        # Optimize RSI parameters using training data
+        try:
+            optimal_params, _ = optimize_rsi(train_data)
+        except ValueError as e:
+            print(f"Error optimizing parameters: {e}")
+            price = data['close'].iloc[i]
+            portfolio_values.append(cash + position * price)
+            buy_signals.append(None)
+            sell_signals.append(None)
+            continue
+
+        rsi_period, rsi_overbought, rsi_oversold = optimal_params
+
+        # Calculate RSI for the current data point
+        # Ensure there is enough data to calculate RSI
+        if i - int(rsi_period) < 0:
+            portfolio_values.append(cash + position * data['close'].iloc[i])
+            buy_signals.append(None)
+            sell_signals.append(None)
+            continue
+
+        rsi_data = data.iloc[i - int(rsi_period) + 1:i + 1]
+        rsi = calculate_rsi(rsi_data, period=int(rsi_period)).iloc[-1]
+
+        price = data['close'].iloc[i]
+
+        if np.isnan(rsi):
+            portfolio_values.append(cash + position * price)
+            buy_signals.append(None)
+            sell_signals.append(None)
+            continue
+
+        if rsi < rsi_oversold and cash > 0:
+            # Buy signal
+            position = cash / price
+            cash = 0
+            trade_count += 1
+            buy_signals.append(price)
+            sell_signals.append(None)
+        elif rsi > rsi_overbought and position > 0:
+            # Sell signal
+            cash = position * price
+            position = 0
+            trade_count += 1
+            buy_signals.append(None)
+            sell_signals.append(price)
+        else:
+            buy_signals.append(None)
+            sell_signals.append(None)
+
+        # Record portfolio value
+        portfolio_value = cash + position * price
+        portfolio_values.append(portfolio_value)
+
+    # Create a new DataFrame for the testing period
+    test_data = data.iloc[window_size:].copy()
+    test_data['portfolio_value'] = portfolio_values
+    test_data['buy_signals'] = buy_signals
+    test_data['sell_signals'] = sell_signals
+
+    final_value = cash + position * data['close'].iloc[-1]
+
+    return test_data, final_value, trade_count
 
 # Function to plot the backtest results
 def plot_results(data):
@@ -137,25 +208,16 @@ def plot_performance(data):
 
 # Main function
 if __name__ == '__main__':
-    # Use uploaded file
-    csv_file = 'D:/research project/data-2y/1d.csv'
+    # Use the uploaded file
+    csv_file = 'D:/research project/data2024/m5.csv'
 
     # Read data
     data = read_data(csv_file)
 
-    # Optimize RSI parameters using PSO
-    optimal_params, final_value = optimize_rsi(data)
-    print(f"Optimal RSI Parameters: {optimal_params}")
-    print(f"Final Portfolio Value with optimized parameters: {final_value}")
-
-    # Backtest and print trade count
-    data, final_value, trade_count = backtest_rsi(optimal_params, data)
+    # Perform dynamic train and test
+    data, final_value, trade_count = dynamic_train_test(data)
+    print(f"Final Portfolio Value with dynamic training: {final_value}")
     print(f"Total Trades: {trade_count}")
-    plot_results(data)
-
-    # Calculate maximum drawdown
-    max_drawdown = calculate_max_drawdown(data['portfolio_value'].values)
-    print(f"Maximum Drawdown: {max_drawdown * 100:.2f}%")
 
     # Plot performance and maximum drawdown
     plot_performance(data)
